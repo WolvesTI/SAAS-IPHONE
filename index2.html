@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iSecure Audit Pro - iOS Security</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        /* Apple-like Typography */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        :root {
+            --apple-bg: #000000;
+            --apple-panel: rgba(28, 28, 30, 0.7);
+            --apple-border: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--apple-bg);
+            background-image: radial-gradient(circle at 50% 0%, #1a1a24 0%, #000000 70%);
+        }
+        
+        .terminal-font { font-family: 'JetBrains Mono', monospace; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+        /* Glassmorphism utilities */
+        .glass-panel {
+            background: var(--apple-panel);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--apple-border);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        /* iOS Toggle Switch Switch */
+        .toggle-checkbox:checked {
+            right: 0;
+            border-color: #34C759;
+        }
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #34C759;
+        }
+        
+        .scan-line {
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(to right, transparent, #0a84ff, transparent);
+            position: absolute;
+            top: 0; left: 0;
+            animation: scan 2s linear infinite;
+            display: none;
+            box-shadow: 0 0 10px #0a84ff;
+        }
+        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+    </style>
+</head>
+<body class="text-zinc-100 h-screen overflow-hidden selection:bg-blue-900 selection:text-blue-100">
+
+    <div id="login-view" class="flex flex-col items-center justify-center h-full relative z-10 transition-opacity duration-500">
+        <div class="absolute inset-0 overflow-hidden -z-10 pointer-events-none">
+            <div class="absolute top-1/3 left-1/4 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl"></div>
+            <div class="absolute bottom-1/3 right-1/4 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl"></div>
+        </div>
+
+        <div class="w-full max-w-sm glass-panel rounded-2xl p-8">
+            <div class="flex flex-col items-center mb-8">
+                <i class="fa-brands fa-apple text-5xl text-white mb-3"></i>
+                <h1 class="text-xl font-semibold tracking-tight">iSecure Audit Pro</h1>
+                <p class="text-zinc-400 text-xs mt-1">Autorización Requerida</p>
+            </div>
+
+            <form id="login-form" class="space-y-4">
+                <div>
+                    <input type="text" id="email" value="admin@apple.local" class="w-full bg-black/50 border border-zinc-700/50 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors" placeholder="Apple ID o Usuario">
+                </div>
+                <div>
+                    <input type="password" id="password" value="demo1234" class="w-full bg-black/50 border border-zinc-700/50 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors" placeholder="Contraseña">
+                </div>
+                <button type="submit" id="btn-login" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-3 rounded-xl transition-all duration-200 mt-4 shadow-lg shadow-blue-900/20">
+                    Iniciar Sesión
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div id="dashboard-view" class="hidden h-full flex flex-col">
+        <header class="h-14 glass-panel border-b-0 border-zinc-800/50 flex items-center justify-between px-6 z-20 rounded-none">
+            <div class="flex items-center gap-4">
+                <i class="fa-brands fa-apple text-xl"></i>
+                <span class="font-semibold text-sm tracking-tight">iSecure Audit <span class="text-zinc-500 font-normal">| Device Assessment</span></span>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 px-3 py-1 bg-black/50 rounded-full border border-zinc-800">
+                    <div id="status-dot" class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
+                    <span id="nav-score" class="text-xs font-medium text-zinc-300">Sistema en Espera</span>
+                </div>
+                <div id="btn-logout" class="w-7 h-7 rounded-full bg-zinc-800 flex items-center justify-center cursor-pointer hover:bg-red-500 transition">
+                    <i class="fa-solid fa-power-off text-[10px]"></i>
+                </div>
+            </div>
+        </header>
+
+        <main class="flex-1 flex overflow-hidden p-4 gap-4">
+            <div class="w-full lg:w-5/12 glass-panel rounded-2xl flex flex-col overflow-hidden">
+                <div class="p-5 border-b border-zinc-800/50 flex justify-between items-center">
+                    <h2 class="text-sm font-semibold flex items-center gap-2">
+                        <i class="fa-solid fa-sliders text-blue-500"></i> Parámetros del Dispositivo
+                    </h2>
+                </div>
+                
+                <div class="flex-1 overflow-y-auto p-5">
+                    <form id="audit-form" class="space-y-5">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1.5">Modelo</label>
+                                <input id="f-model" type="text" class="w-full bg-black/40 border border-zinc-800 rounded-lg p-2.5 text-sm focus:border-blue-500 focus:outline-none" value="iPhone 15 Pro">
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1.5">Versión iOS</label>
+                                <input id="f-ios" type="text" class="w-full bg-black/40 border border-zinc-800 rounded-lg p-2.5 text-sm focus:border-blue-500 focus:outline-none" value="17.4.1">
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1.5">Seguridad de Pantalla</label>
+                            <select id="f-passcode" class="w-full bg-black/40 border border-zinc-800 rounded-lg p-2.5 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none appearance-none">
+                                <option value="6digit">Alfanumérico / 6+ dígitos</option>
+                                <option value="4digit">Código de 4 dígitos</option>
+                                <option value="none">Sin Código (Riesgo)</option>
+                            </select>
+                        </div>
+
+                        <div class="border-t border-zinc-800/50 my-2"></div>
+                        <p class="text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-3">Configuraciones de Sistema</p>
+
+                        <div class="space-y-4">
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-zinc-200">Jailbreak detectado</span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="f-jailbroken" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 border-zinc-700 appearance-none cursor-pointer transition-transform duration-200 ease-in-out z-10"/>
+                                    <label for="f-jailbroken" class="toggle-label block overflow-hidden h-5 rounded-full bg-zinc-700 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-zinc-200">Autenticación 2FA (Apple ID)</span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="f-2fa" checked class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 border-zinc-700 appearance-none cursor-pointer transition-transform duration-200 ease-in-out z-10"/>
+                                    <label for="f-2fa" class="toggle-label block overflow-hidden h-5 rounded-full bg-zinc-700 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-zinc-200">Buscar mi iPhone activado</span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="f-findmy" checked class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 border-zinc-700 appearance-none cursor-pointer transition-transform duration-200 ease-in-out z-10"/>
+                                    <label for="f-findmy" class="toggle-label block overflow-hidden h-5 rounded-full bg-zinc-700 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-zinc-200">Restricción de Accesorios USB</span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="f-usbrestricted" checked class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 border-zinc-700 appearance-none cursor-pointer transition-transform duration-200 ease-in-out z-10"/>
+                                    <label for="f-usbrestricted" class="toggle-label block overflow-hidden h-5 rounded-full bg-zinc-700 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-zinc-200">Perfiles / MDM desconocidos</span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="f-unknownprofiles" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 border-zinc-700 appearance-none cursor-pointer transition-transform duration-200 ease-in-out z-10"/>
+                                    <label for="f-unknownprofiles" class="toggle-label block overflow-hidden h-5 rounded-full bg-zinc-700 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-sm text-zinc-200">Sideloading de apps permitido</span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="f-sideloading" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 border-zinc-700 appearance-none cursor-pointer transition-transform duration-200 ease-in-out z-10"/>
+                                    <label for="f-sideloading" class="toggle-label block overflow-hidden h-5 rounded-full bg-zinc-700 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                
+                <div class="p-4 border-t border-zinc-800/50 bg-black/20">
+                    <button id="btn-submit-form" class="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-medium transition-all shadow-lg flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-microchip"></i> Iniciar Escaneo de Seguridad
+                    </button>
+                </div>
+            </div>
+
+            <div class="w-full lg:w-7/12 flex flex-col gap-4">
+                
+                <div class="glass-panel border-zinc-800/50 rounded-2xl flex flex-col h-72 relative overflow-hidden shadow-2xl">
+                    <div class="h-10 bg-black/40 border-b border-zinc-800/50 flex items-center px-4 gap-2">
+                        <div class="w-3 h-3 rounded-full bg-[#ff5f56]"></div>
+                        <div class="w-3 h-3 rounded-full bg-[#ffbd2e]"></div>
+                        <div class="w-3 h-3 rounded-full bg-[#27c93f]"></div>
+                        <span class="ml-2 text-[10px] font-mono text-zinc-500">root@isecure-audit-engine ~</span>
+                    </div>
+                    
+                    <div id="terminal-body" class="flex-1 p-4 overflow-y-auto terminal-font text-xs leading-relaxed bg-black/80">
+                        <div class="text-zinc-500 mb-2">Security Daemon initialized. Ready for assessment.</div>
+                        <div id="logs-container"></div>
+                        <div id="cursor-line" class="flex items-center gap-2 hidden">
+                            <span class="text-blue-500">➜</span>
+                            <span class="w-2 h-4 bg-zinc-400 animate-pulse"></span>
+                        </div>
+                    </div>
+
+                    <div class="scan-line" id="device-scan-line"></div>
+
+                    <div id="scan-progress-container" class="absolute bottom-0 left-0 w-full h-1 bg-zinc-800 hidden">
+                        <div id="scan-progress-bar" class="h-full bg-blue-500 transition-all duration-300 w-0"></div>
+                    </div>
+                </div>
+
+                <div id="results-section" class="hidden flex-1 glass-panel rounded-2xl overflow-hidden flex flex-col animate-in fade-in slide-in-from-bottom-4 duration-500">
+                    <div class="p-5 border-b border-zinc-800/50 flex items-center justify-between bg-black/20">
+                        <h3 class="font-semibold text-sm flex items-center gap-2">
+                            <i class="fa-solid fa-shield-check text-blue-500"></i> Reporte de Postura de Seguridad
+                        </h3>
+                        <div class="flex items-center gap-3">
+                            <span class="text-xs text-zinc-400 uppercase">Score Global:</span>
+                            <span id="final-score" class="text-2xl font-bold terminal-font">0</span>
+                        </div>
+                    </div>
+                    
+                    <div class="flex-1 p-5 overflow-y-auto bg-black/10">
+                        <div id="findings-container" class="space-y-3">
+                            </div>
+                    </div>
+                </div>
+
+                <div id="empty-state" class="flex-1 glass-panel rounded-2xl flex flex-col items-center justify-center text-center p-6 border-dashed border-2 border-zinc-800/50">
+                    <div class="w-16 h-16 rounded-full bg-zinc-800/50 flex items-center justify-center mb-4">
+                        <i class="fa-solid fa-radar text-2xl text-blue-500"></i>
+                    </div>
+                    <h3 class="text-zinc-200 font-medium mb-1">Esperando Parámetros</h3>
+                    <p class="text-zinc-500 text-xs max-w-sm">Ajusta las configuraciones del dispositivo en el panel lateral y presiona "Iniciar Escaneo" para ejecutar la simulación y calcular el score.</p>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <div id="toasts" class="fixed bottom-6 right-6 z-50 flex flex-col gap-2"></div>
+
+    <script>
+        const $ = (s) => document.querySelector(s);
+        
+        // --- AUTH LOGIC ---
+        $('#login-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const btn = $('#btn-login');
+            btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Autenticando...';
+            btn.disabled = true;
+
+            setTimeout(() => {
+                $('#login-view').classList.add('opacity-0', 'scale-95');
+                setTimeout(() => {
+                    $('#login-view').classList.add('hidden');
+                    $('#dashboard-view').classList.remove('hidden');
+                    showToast('Inicio Exitoso', 'Conectado al motor de auditoría.', 'success');
+                }, 500);
+            }, 1000);
+        });
+
+        $('#btn-logout').addEventListener('click', () => {
+            location.reload(); // Simple reset for demo
+        });
+
+        // --- TOAST SYSTEM ---
+        function showToast(title, message, type) {
+            const toastEl = document.createElement('div');
+            const icon = type === 'success' ? '<i class="fa-solid fa-check-circle text-[#34C759]"></i>' 
+                       : type === 'error' ? '<i class="fa-solid fa-xmark-circle text-[#FF3B30]"></i>' 
+                       : '<i class="fa-solid fa-triangle-exclamation text-[#FFCC00]"></i>';
+                       
+            toastEl.className = `flex items-start gap-3 glass-panel rounded-xl p-4 shadow-xl mb-2 transition-all duration-300 transform translate-y-4 opacity-0 border border-zinc-700/50`;
+            toastEl.innerHTML = `
+                <div class="mt-0.5">${icon}</div>
+                <div>
+                    <h4 class="text-xs font-semibold text-zinc-100">${title}</h4>
+                    <p class="text-[11px] text-zinc-400 mt-0.5">${message}</p>
+                </div>
+            `;
+            
+            $('#toasts').appendChild(toastEl);
+            requestAnimationFrame(() => toastEl.classList.remove('translate-y-4', 'opacity-0'));
+            setTimeout(() => {
+                toastEl.classList.add('opacity-0', 'scale-95');
+                setTimeout(() => toastEl.remove(), 300);
+            }, 4000);
+        }
+
+        // --- ASSESSMENT MATH ---
+        function computeAssessment(form) {
+            const findings = [];
+            const add = (severity, title, detail) => findings.push({ severity, title, detail });
+
+            if (form.jailbroken) add('critical', 'Jailbreak / Modificación Root', 'El sistema base está expuesto. Firmas de integridad comprometidas.');
+            if (form.passcode === 'none') {
+                add('critical', 'Sin Código de Desbloqueo', 'Cualquier acceso físico permite la extracción completa de datos.');
+            } else if (form.passcode === '4digit') {
+                add('high', 'Código Débil (4 Dígitos)', 'Susceptible a ataques de fuerza bruta cortos si se eluden bloqueos.');
+            }
+            if (!form.twoFactor) add('high', '2FA Desactivado', 'El Apple ID es vulnerable a ataques de phishing y toma de control remota.');
+            if (!form.findMy) add('medium', 'Buscar mi iPhone Inactivo', 'Imposibilidad de realizar un borrado remoto (Wipe) en caso de robo.');
+            if (!form.usbRestricted) add('high', 'Accesorios USB Permitidos', 'Abre vectores de ataque a través del puerto Lightning/USB-C bloqueado.');
+            if (form.unknownProfiles) add('high', 'Perfiles / MDM Desconocidos', 'Riesgo de interceptación de tráfico (MitM) o instalación silenciosa de apps.');
+            if (form.sideloading) add('medium', 'Sideloading Habilitado', 'Apps fuera del ecosistema App Store pueden contener código malicioso no auditado.');
+
+            const weights = { critical: 25, high: 15, medium: 8, low: 4 };
+            let score = 100;
+            findings.forEach(f => score -= (weights[f.severity] || 0));
+            score = Math.max(0, Math.min(100, Math.round(score)));
+
+            return { score, findings };
+        }
+
+        // --- SCANNER SIMULATION & EXECUTION ---
+        const terminalBody = $('#terminal-body');
+        const logsContainer = $('#logs-container');
+        const cursorLine = $('#cursor-line');
+        const progressBar = $('#scan-progress-bar');
+        const progressContainer = $('#scan-progress-container');
+        let isScanning = false;
+
+        function addLog(message, type = 'info') {
+            const div = document.createElement('div');
+            div.className = 'mb-1.5 flex gap-2';
+            
+            let color = 'text-zinc-300';
+            let icon = '<span class="text-blue-500">[*]</span>';
+            
+            if (type === 'error') { color = 'text-[#FF3B30]'; icon = '<span class="text-[#FF3B30]">[!]</span>'; }
+            if (type === 'success') { color = 'text-[#34C759]'; icon = '<span class="text-[#34C759]">[+]</span>'; }
+            if (type === 'warning') { color = 'text-[#FFCC00]'; icon = '<span class="text-[#FFCC00]">[-]</span>'; }
+
+            div.innerHTML = `${icon} <span class="${color}">${message}</span>`;
+            logsContainer.appendChild(div);
+            terminalBody.scrollTop = terminalBody.scrollHeight;
+        }
+
+        function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+        $('#btn-submit-form').addEventListener('click', async () => {
+            if (isScanning) return;
+            isScanning = true;
+
+            // Gather Data
+            const formData = {
+                model: $('#f-model').value || 'iPhone',
+                ios: $('#f-ios').value,
+                passcode: $('#f-passcode').value,
+                jailbroken: $('#f-jailbroken').checked,
+                twoFactor: $('#f-2fa').checked,
+                findMy: $('#f-findmy').checked,
+                usbRestricted: $('#f-usbrestricted').checked,
+                unknownProfiles: $('#f-unknownprofiles').checked,
+                sideloading: $('#f-sideloading').checked
+            };
+
+            // UI Prep
+            $('#btn-submit-form').innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Analizando Dispositivo...';
+            $('#btn-submit-form').classList.replace('bg-blue-600', 'bg-zinc-700');
+            $('#status-dot').classList.replace('bg-blue-500', 'bg-[#FFCC00]');
+            $('#nav-score').textContent = 'Escaneando...';
+            
+            $('#empty-state').classList.add('hidden');
+            $('#results-section').classList.add('hidden');
+            $('#device-scan-line').style.display = 'block';
+            progressContainer.classList.remove('hidden');
+            cursorLine.classList.remove('hidden');
+            logsContainer.innerHTML = '';
+            progressBar.style.width = '0%';
+
+            // Terminal Simulation Steps
+            addLog(`Iniciando conexión con ${formData.model} (iOS ${formData.ios})...`, 'info');
+            await wait(800); progressBar.style.width = '15%';
+            addLog('Verificando Sandbox del sistema y firmas del Kernel...', 'info');
+            
+            if (formData.jailbroken) {
+                await wait(600); addLog('CRITICAL: Firmas de integridad rotas. Anomalías root detectadas.', 'error');
+            } else {
+                await wait(600); addLog('Integridad del Kernel verificada.', 'success');
+            }
+            progressBar.style.width = '35%';
+
+            await wait(700); addLog('Analizando configuración de políticas de acceso...', 'info');
+            if (formData.passcode === 'none') {
+                await wait(400); addLog('CRITICAL: No se detecta Secure Enclave Passcode.', 'error');
+            }
+            progressBar.style.width = '55%';
+
+            await wait(800); addLog('Consultando perfiles de aprovisionamiento MDM...', 'info');
+            if (formData.unknownProfiles) {
+                await wait(500); addLog('WARNING: Perfiles de configuración no firmados instalados.', 'warning');
+            }
+            progressBar.style.width = '75%';
+
+            await wait(900); addLog('Evaluando restricciones físicas (USB/NFC)...', 'info');
+            if (!formData.usbRestricted) {
+                await wait(300); addLog('WARNING: Puerto USB permite transferencia de datos con pantalla bloqueada.', 'warning');
+            }
+            progressBar.style.width = '90%';
+
+            await wait(1000); addLog('Compilando reporte de postura de seguridad...', 'success');
+            progressBar.style.width = '100%';
+            
+            // Finish Simulation
+            await wait(500);
+            $('#device-scan-line').style.display = 'none';
+            progressContainer.classList.add('hidden');
+            cursorLine.classList.add('hidden');
+            isScanning = false;
+            
+            $('#btn-submit-form').innerHTML = '<i class="fa-solid fa-rotate-right"></i> Ejecutar Nuevo Escaneo';
+            $('#btn-submit-form').classList.replace('bg-zinc-700', 'bg-blue-600');
+            $('#status-dot').classList.replace('bg-[#FFCC00]', 'bg-[#34C759]');
+
+            // Render Results
+            const result = computeAssessment(formData);
+            renderResults(result);
+        });
+
+        function renderResults(result) {
+            const container = $('#findings-container');
+            const scoreEl = $('#final-score');
+            
+            // Update Headers
+            scoreEl.textContent = result.score;
+            scoreEl.className = `text-3xl font-bold terminal-font ${
+                result.score >= 80 ? 'text-[#34C759]' : result.score >= 50 ? 'text-[#FFCC00]' : 'text-[#FF3B30]'
+            }`;
+            $('#nav-score').textContent = `Postura: ${result.score}/100`;
+
+            // Build HTML
+            let html = '';
+            if (result.findings.length === 0) {
+                html = `
+                <div class="p-4 bg-[#34C759]/10 border border-[#34C759]/30 rounded-xl flex items-start gap-3">
+                    <i class="fa-solid fa-shield-check text-[#34C759] text-lg mt-0.5"></i>
+                    <div>
+                        <h4 class="text-sm font-semibold text-white">Dispositivo Seguro</h4>
+                        <p class="text-xs text-zinc-400 mt-1">El dispositivo cumple con las recomendaciones de seguridad óptimas establecidas por los estándares de Apple.</p>
+                    </div>
+                </div>`;
+            } else {
+                result.findings.forEach(f => {
+                    const st = f.severity === 'critical' ? { bg: 'bg-[#FF3B30]/10', border: 'border-[#FF3B30]/30', text: 'text-[#FF3B30]', icon: 'fa-skull-crossbones' } :
+                               f.severity === 'high'     ? { bg: 'bg-[#FF9500]/10', border: 'border-[#FF9500]/30', text: 'text-[#FF9500]', icon: 'fa-fire' } :
+                                                           { bg: 'bg-[#FFCC00]/10', border: 'border-[#FFCC00]/30', text: 'text-[#FFCC00]', icon: 'fa-triangle-exclamation' };
+                    
+                    html += `
+                    <div class="p-4 ${st.bg} border ${st.border} rounded-xl flex items-start gap-3 transition-all hover:bg-opacity-20">
+                        <i class="fa-solid ${st.icon} ${st.text} mt-1"></i>
+                        <div>
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded border ${st.border} ${st.text}">${f.severity}</span>
+                                <h4 class="text-sm font-semibold text-zinc-100">${f.title}</h4>
+                            </div>
+                            <p class="text-xs text-zinc-400 mt-1">${f.detail}</p>
+                        </div>
+                    </div>`;
+                });
+            }
+
+            container.innerHTML = html;
+            $('#results-section').classList.remove('hidden');
+            
+            showToast('Análisis Completado', `Se calcularon ${result.findings.length} hallazgos de seguridad.`, 'success');
+        }
+    </script>
+</body>
+</html>

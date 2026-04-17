@@ -1,0 +1,1446 @@
+<!doctype html>
+<html lang="es" class="h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iAudit SaaS — Security Check (Demo)</title>
+  <meta name="description" content="SaaS demo para evaluar configuración de seguridad de iPhone mediante checklist y recomendaciones. No realiza explotación ni escaneo real del dispositivo desde el navegador." />
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+ 
+</head> <style>
+    /* Subtle scrollbar */
+    *::-webkit-scrollbar{height:10px;width:10px}
+    *::-webkit-scrollbar-thumb{background:rgba(148,163,184,.35);border-radius:999px}
+    *::-webkit-scrollbar-track{background:transparent}
+    .glass{backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px)}
+    .no-select{-webkit-user-select:none;user-select:none}
+  </style>
+<body class="h-full bg-slate-950 text-slate-100">
+  <div id="app" class="min-h-full"></div>
+
+  <!-- Toasts -->
+  <div id="toasts" class="fixed right-4 top-4 z-50 space-y-2"></div>
+
+  <script>
+    /**
+     * iAudit SaaS (Demo)
+     * IMPORTANT LIMITATION:
+     * Browsers cannot perform a real security scan of an iPhone when connected via cable.
+     * This app provides a best-practice assessment based on user-provided settings.
+     */
+
+    // ------------------------
+    // Utilities
+    // ------------------------
+    const $ = (sel, root = document) => root.querySelector(sel);
+    const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+    const uid = () => Math.random().toString(16).slice(2) + Date.now().toString(16);
+
+    const storage = {
+      get(key, fallback = null) {
+        try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+      },
+      set(key, value) { localStorage.setItem(key, JSON.stringify(value)); },
+      del(key) { localStorage.removeItem(key); }
+    };
+
+    const toast = (type, title, message) => {
+      const colors = {
+        success: 'border-emerald-400/30 bg-emerald-950/60 text-emerald-50',
+        info: 'border-sky-400/30 bg-sky-950/60 text-sky-50',
+        warn: 'border-amber-400/30 bg-amber-950/60 text-amber-50',
+        danger: 'border-rose-400/30 bg-rose-950/60 text-rose-50'
+      };
+      const el = document.createElement('div');
+      el.className = `glass border ${colors[type] || colors.info} shadow-lg rounded-xl p-3 w-[min(420px,calc(100vw-2rem))]`;
+      el.innerHTML = `
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 h-2 w-2 rounded-full ${type==='success'?'bg-emerald-400':type==='warn'?'bg-amber-400':type==='danger'?'bg-rose-400':'bg-sky-400'}"></div>
+          <div class="min-w-0 flex-1">
+            <div class="font-semibold leading-5">${escapeHtml(title)}</div>
+            <div class="text-sm opacity-90 mt-0.5">${escapeHtml(message)}</div>
+          </div>
+          <button class="text-slate-200/70 hover:text-slate-50" aria-label="Cerrar">✕</button>
+        </div>
+      `;
+      const close = () => {
+        el.classList.add('opacity-0', 'translate-y-[-6px]');
+        setTimeout(() => el.remove(), 180);
+      };
+      $('button', el).addEventListener('click', close);
+      $('#toasts').appendChild(el);
+      requestAnimationFrame(() => el.classList.add('transition', 'duration-200'));
+      setTimeout(close, 5200);
+    };
+
+    const escapeHtml = (str) => String(str)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+
+    const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+
+    const formatDateTime = (d) => {
+      const dt = (d instanceof Date) ? d : new Date(d);
+      return dt.toLocaleString(undefined, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+    };
+
+    // ------------------------
+    // Demo Auth
+    // ------------------------
+    const DEMO_USER = {
+      email: 'demo@iaudit.local',
+      password: 'demo1234',
+      name: 'Demo Analyst',
+      plan: 'Trial'
+    };
+
+    const session = {
+      get() { return storage.get('iaudit.session', null); },
+      set(s) { storage.set('iaudit.session', s); },
+      clear() { storage.del('iaudit.session'); }
+    };
+
+    // ------------------------
+    // App State
+    // ------------------------
+    const defaults = {
+      theme: 'dark',
+      org: 'Tu organización',
+      findingsResolved: {},
+      assessments: [],
+      lastForm: null
+    };
+
+    const state = {
+      ui: {
+        route: 'overview',
+        loading: false,
+        filterSeverity: 'all'
+      },
+      user: null,
+      prefs: storage.get('iaudit.prefs', defaults)
+    };
+
+    const persistPrefs = () => storage.set('iaudit.prefs', state.prefs);
+
+    const setTheme = (theme) => {
+      state.prefs.theme = theme;
+      persistPrefs();
+      const root = document.documentElement;
+      if (theme === 'dark') root.classList.add('dark');
+      else root.classList.remove('dark');
+      // body colors are already dark-first; for light mode we switch via classes.
+      document.body.className = document.body.className
+        .replace(/bg-slate-\d+/g, '')
+        .replace(/text-slate-\d+/g, '')
+        .trim();
+      if (theme === 'dark') {
+        document.body.classList.add('bg-slate-950', 'text-slate-100');
+      } else {
+        document.body.classList.add('bg-slate-50', 'text-slate-950');
+      }
+    };
+
+    // ------------------------
+    // Assessment Logic (Checklist-based)
+    // ------------------------
+    const severityMeta = {
+      critical: { label:'Crítica', color:'bg-rose-500/15 text-rose-200 ring-rose-400/30' },
+      high:     { label:'Alta',    color:'bg-orange-500/15 text-orange-200 ring-orange-400/30' },
+      medium:   { label:'Media',   color:'bg-amber-500/15 text-amber-200 ring-amber-400/30' },
+      low:      { label:'Baja',    color:'bg-sky-500/15 text-sky-200 ring-sky-400/30' },
+      info:     { label:'Info',    color:'bg-slate-500/15 text-slate-200 ring-slate-400/30' }
+    };
+
+    function computeAssessment(form) {
+      // form is user-provided; we never attempt to exploit.
+      const findings = [];
+
+      const add = (id, severity, title, detail, fix, refs=[]) => {
+        findings.push({
+          id,
+          severity,
+          title,
+          detail,
+          fix,
+          refs,
+          createdAt: Date.now()
+        });
+      };
+
+      // Basic consistency
+      if (!form.device.model) add('missing-model', 'info', 'Modelo no especificado', 'No indicaste el modelo del iPhone.', 'Completa el modelo para un reporte más preciso.');
+      if (!form.device.iosVersion) add('missing-ios', 'info', 'Versión de iOS no especificada', 'No indicaste la versión de iOS.', 'Completa la versión (p. ej., 17.3).');
+
+      // Jailbreak
+      if (form.device.jailbroken === true) {
+        add('jailbreak', 'critical', 'Indicador de jailbreak',
+          'Indicaste que el dispositivo está jailbreakeado, lo que incrementa significativamente la superficie de ataque.',
+          'Restaura el iPhone a estado de fábrica con iTunes/Finder y evita repositorios/tweaks no confiables.');
+      }
+
+      // Passcode
+      if (form.security.passcode === 'none') {
+        add('no-passcode', 'critical', 'Sin código de desbloqueo',
+          'Sin passcode, la extracción de datos y acceso físico es mucho más viable.',
+          'Activa un passcode (idealmente alfanumérico) y Face ID/Touch ID.');
+      }
+      if (form.security.passcode === '4digit') {
+        add('weak-passcode', 'high', 'Passcode de 4 dígitos',
+          'Los passcodes cortos reducen el espacio de búsqueda y elevan el riesgo si un atacante obtiene el dispositivo.',
+          'Cambia a 6 dígitos o alfanumérico: Ajustes → Face ID/Touch ID y código.');
+      }
+      if (form.security.autoLockMinutes > 2) {
+        add('auto-lock', 'medium', 'Bloqueo automático alto',
+          `Tu auto-bloqueo está en ${form.security.autoLockMinutes} minutos.`,
+          'Recomendación: 30s–2min en entornos de riesgo.');
+      }
+
+      // Apple Account protections
+      if (!form.security.twoFactor) {
+        add('no-2fa', 'high', '2FA desactivado',
+          'Sin autenticación de dos factores, el compromiso de la cuenta Apple es más probable.',
+          'Activa 2FA en tu Apple ID y usa llaves de seguridad si aplica.');
+      }
+      if (!form.security.findMy) {
+        add('no-findmy', 'medium', 'Buscar mi iPhone desactivado',
+          'Esto reduce la capacidad de rastreo/borrado remoto.',
+          'Activa Buscar mi iPhone para poder localizar y borrar el dispositivo.');
+      }
+      if (!form.security.icKeychain) {
+        add('no-keychain', 'low', 'Llavero iCloud desactivado',
+          'No es una vulnerabilidad directa, pero podrías depender de gestores menos integrados.',
+          'Usa un gestor de contraseñas confiable y evita reutilización.');
+      }
+
+      // Advanced protections
+      if (!form.security.lockdownMode) {
+        add('no-lockdown', 'info', 'Modo de aislamiento no activado',
+          'El Modo de aislamiento (Lockdown) es para amenazas dirigidas. No siempre es necesario.',
+          'Si eres objetivo de alto riesgo (periodismo, activismo, ejecutivos), considera activarlo.');
+      }
+      if (form.security.advancedDataProtection === false) {
+        add('no-adp', 'medium', 'Protección avanzada de datos (iCloud) desactivada',
+          'Esto puede reducir el nivel de cifrado end-to-end para ciertos datos en iCloud.',
+          'Activa Protección avanzada de datos si es compatible con tu cuenta y entorno.');
+      }
+
+      // USB accessories
+      if (form.security.usbRestricted === false) {
+        add('usb-accessories', 'high', 'Accesorios USB permitidos con el iPhone bloqueado',
+          'Permitir accesorios USB con el dispositivo bloqueado aumenta el riesgo ante ataques físicos con herramientas especializadas.',
+          'Activa “Accesorios USB” restringidos: Ajustes → Face ID/Touch ID y código.');
+      }
+
+      // Profiles & MDM
+      if (form.apps.unknownProfiles === true) {
+        add('profiles', 'high', 'Perfiles desconocidos instalados',
+          'Perfiles de configuración pueden redirigir tráfico, instalar certificados o imponer políticas.',
+          'Revisa y elimina perfiles/certificados que no reconozcas: Ajustes → General → VPN y gestión de dispositivos.');
+      }
+      if (form.apps.enterpriseCerts === true) {
+        add('enterprise', 'high', 'Certificados empresariales presentes',
+          'Certificados empresariales pueden permitir apps fuera de App Store; si no es gestionado, puede ser riesgoso.',
+          'Verifica que provengan de tu organización; revoca los no autorizados.');
+      }
+
+      // App install sources
+      if (form.apps.sideloading === true) {
+        add('sideloading', 'medium', 'Instalación fuera de App Store',
+          'La instalación fuera de App Store puede aumentar el riesgo si no hay control de integridad.',
+          'Limita a fuentes confiables y mantén políticas MDM / revisión de apps en organizaciones.');
+      }
+
+      // Network
+      if (form.network.autoJoinOpenWiFi === true) {
+        add('open-wifi', 'medium', 'Auto-unión a Wi‑Fi abiertas',
+          'Conectarse automáticamente a redes abiertas incrementa el riesgo de ataques MITM y portales maliciosos.',
+          'Desactiva auto-unión en redes abiertas y prioriza redes WPA2/WPA3.');
+      }
+      if (!form.network.vpnWhenUntrusted) {
+        add('no-vpn', 'low', 'VPN no forzada en redes no confiables',
+          'En viajes o redes públicas, una VPN reduce exposición, aunque no sustituye HTTPS.',
+          'Activa VPN en redes públicas y usa DNS seguro si procede.');
+      }
+      if (!form.network.privateRelay && form.network.usesICloudPlus) {
+        add('no-private-relay', 'info', 'Relay privado desactivado',
+          'Si tienes iCloud+, Relay privado puede reducir rastreo en Safari (no es un control de seguridad total).',
+          'Considera habilitarlo si no interfiere con tus redes corporativas.');
+      }
+
+      // Privacy hardening
+      if (form.privacy.adTrackingAllowed) {
+        add('ad-tracking', 'low', 'Rastreo publicitario permitido',
+          'Permitir rastreo aumenta correlación de datos y exposición de privacidad.',
+          'Desactiva “Permitir que las apps soliciten rastrearte” en Privacidad.');
+      }
+
+      // Updates
+      const updateRisk = (() => {
+        const v = (form.device.iosVersion || '').trim();
+        if (!v) return null;
+        // simple heuristic: if major < 16 -> high; if 16 -> medium; if 17+ -> ok (not authoritative)
+        const major = parseInt(v.split('.')[0], 10);
+        if (Number.isNaN(major)) return null;
+        return major;
+      })();
+      if (updateRisk !== null) {
+        if (updateRisk <= 15) {
+          add('old-ios', 'high', 'iOS posiblemente desactualizado',
+            `Indicador: iOS ${form.device.iosVersion}. Versiones antiguas suelen contener vulnerabilidades corregidas en releases más recientes.`,
+            'Actualiza a la última versión disponible: Ajustes → General → Actualización de software.');
+        } else if (updateRisk === 16) {
+          add('ios16', 'medium', 'Considera actualizar iOS',
+            `Indicador: iOS ${form.device.iosVersion}. Mantenerse al día reduce riesgos conocidos.`,
+            'Actualiza a la última versión disponible si tu dispositivo lo soporta.');
+        }
+      }
+
+      // Score: start at 100 and subtract weighted penalties for unresolved findings.
+      const weights = { critical: 22, high: 14, medium: 8, low: 4, info: 1 };
+      let score = 100;
+      for (const f of findings) score -= (weights[f.severity] || 1);
+      score = clamp(Math.round(score), 0, 100);
+
+      const riskBand = score >= 85 ? 'Bajo' : score >= 70 ? 'Moderado' : score >= 50 ? 'Alto' : 'Crítico';
+
+      const breakdown = ['critical','high','medium','low','info'].reduce((acc, k) => {
+        acc[k] = findings.filter(x => x.severity === k).length;
+        return acc;
+      }, {});
+
+      return {
+        id: uid(),
+        createdAt: Date.now(),
+        device: form.device,
+        form,
+        score,
+        riskBand,
+        breakdown,
+        findings
+      };
+    }
+
+    // ------------------------
+    // UI Rendering
+    // ------------------------
+    const app = $('#app');
+
+    function layoutAuth() {
+      const theme = state.prefs.theme;
+      return `
+        <div class="min-h-screen flex">
+          <div class="hidden lg:flex w-1/2 relative overflow-hidden">
+            <div class="absolute inset-0 bg-gradient-to-br ${theme==='dark' ? 'from-slate-950 via-slate-900 to-indigo-950' : 'from-slate-100 via-white to-indigo-100'}"></div>
+            <div class="absolute -top-20 -left-20 h-96 w-96 rounded-full blur-3xl ${theme==='dark' ? 'bg-indigo-500/20' : 'bg-indigo-500/15'}"></div>
+            <div class="absolute bottom-0 right-0 h-[32rem] w-[32rem] rounded-full blur-3xl ${theme==='dark' ? 'bg-sky-500/15' : 'bg-sky-500/10'}"></div>
+            <div class="relative z-10 p-10 flex flex-col justify-between w-full">
+              <div>
+                <div class="flex items-center gap-3">
+                  <div class="h-10 w-10 rounded-xl bg-gradient-to-br from-indigo-500 to-sky-500 shadow ring-1 ring-white/10"></div>
+                  <div>
+                    <div class="text-xl font-semibold tracking-tight">iAudit SaaS</div>
+                    <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Evaluación de seguridad (checklist) para iPhone</div>
+                  </div>
+                </div>
+                <div class="mt-10 max-w-lg">
+                  <div class="text-3xl font-semibold leading-tight">Audita configuración, endurece tu postura, genera reportes.</div>
+                  <p class="mt-4 ${theme==='dark'?'text-slate-300':'text-slate-700'}">
+                    Esta demo <span class="font-semibold">no escanea el iPhone por cable</span> (un navegador no tiene permisos para ello).
+                    En su lugar, genera un análisis basado en <span class="font-semibold">tus respuestas</span> y mejores prácticas.
+                  </p>
+                  <div class="mt-6 grid grid-cols-2 gap-3">
+                    ${featureCard('Modo oscuro', 'UI cuidada y legible, con accesibilidad.')} 
+                    ${featureCard('Checklist', 'Cobertura de controles clave de iOS.')} 
+                    ${featureCard('Reporte', 'Exporta JSON o imprime el informe.')} 
+                    ${featureCard('Historial', 'Guarda evaluaciones en el navegador.')} 
+                  </div>
+                </div>
+              </div>
+              <div class="text-xs ${theme==='dark'?'text-slate-400':'text-slate-500'}">
+                Aviso: no se realizan acciones ofensivas ni explotación. Recomendaciones orientadas a hardening.
+              </div>
+            </div>
+          </div>
+
+          <div class="flex-1 flex items-center justify-center p-6">
+            <div class="w-full max-w-md">
+              <div class="lg:hidden mb-6">
+                <div class="flex items-center gap-3">
+                  <div class="h-10 w-10 rounded-xl bg-gradient-to-br from-indigo-500 to-sky-500 shadow ring-1 ring-white/10"></div>
+                  <div>
+                    <div class="text-xl font-semibold tracking-tight">iAudit SaaS</div>
+                    <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Demo — evaluación por checklist</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="glass rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} shadow-xl">
+                <div class="p-6">
+                  <div class="flex items-start justify-between gap-4">
+                    <div>
+                      <div class="text-lg font-semibold">Iniciar sesión</div>
+                      <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Usa el acceso de prueba por defecto.</div>
+                    </div>
+                    <button id="toggleTheme" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">
+                      ${theme==='dark'?'Oscuro':'Claro'}
+                    </button>
+                  </div>
+
+                  <div class="mt-5 space-y-3">
+                    <div>
+                      <label class="text-sm ${theme==='dark'?'text-slate-200':'text-slate-700'}">Email</label>
+                      <input id="email" type="email" class="mt-1 w-full rounded-xl px-3 py-2 bg-transparent ring-1 ${theme==='dark'?'ring-white/10 focus:ring-sky-400/40':'ring-slate-200 focus:ring-sky-400/40'} outline-none" placeholder="demo@iaudit.local" autocomplete="username" />
+                    </div>
+                    <div>
+                      <label class="text-sm ${theme==='dark'?'text-slate-200':'text-slate-700'}">Contraseña</label>
+                      <input id="password" type="password" class="mt-1 w-full rounded-xl px-3 py-2 bg-transparent ring-1 ${theme==='dark'?'ring-white/10 focus:ring-sky-400/40':'ring-slate-200 focus:ring-sky-400/40'} outline-none" placeholder="demo1234" autocomplete="current-password" />
+                    </div>
+                    <div class="flex items-center justify-between">
+                      <button id="useDemo" class="text-sm ${theme==='dark'?'text-sky-300 hover:text-sky-200':'text-sky-700 hover:text-sky-800'}">Rellenar demo</button>
+                      <div class="text-xs ${theme==='dark'?'text-slate-400':'text-slate-500'}">Plan: ${DEMO_USER.plan}</div>
+                    </div>
+                    <button id="loginBtn" class="w-full rounded-xl px-4 py-2.5 bg-gradient-to-r from-indigo-500 to-sky-500 text-white font-semibold shadow hover:opacity-95 transition">
+                      Entrar
+                    </button>
+                  </div>
+
+                  <div class="mt-5 rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-slate-50'} p-3">
+                    <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-700'}">
+                      <span class="font-semibold">Limitación técnica:</span> un sitio web no puede inspeccionar tu iPhone por cable.
+                      Esta app produce un <span class="font-semibold">informe de postura</span> basado en configuración.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-4 text-xs ${theme==='dark'?'text-slate-400':'text-slate-500'}">
+                Consejo: para auditorías reales de flota se requiere MDM o una app con permisos adecuados.
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function featureCard(title, desc) {
+      const theme = state.prefs.theme;
+      return `
+        <div class="rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-3">
+          <div class="text-sm font-semibold">${escapeHtml(title)}</div>
+          <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">${escapeHtml(desc)}</div>
+        </div>
+      `;
+    }
+
+    function layoutApp() {
+      const theme = state.prefs.theme;
+      const route = state.ui.route;
+      const assessments = state.prefs.assessments || [];
+      const last = assessments[0] || null;
+      const score = last?.score ?? null;
+      const risk = last?.riskBand ?? '—';
+
+      return `
+        <div class="min-h-screen">
+          <header class="sticky top-0 z-30 border-b ${theme==='dark'?'border-white/10 bg-slate-950/75':'border-slate-200 bg-white/75'} glass">
+            <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
+              <div class="flex items-center gap-3 min-w-0">
+                <div class="h-9 w-9 rounded-xl bg-gradient-to-br from-indigo-500 to-sky-500 shadow ring-1 ring-white/10"></div>
+                <div class="min-w-0">
+                  <div class="font-semibold leading-5 truncate">iAudit SaaS</div>
+                  <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} truncate">${escapeHtml(state.user?.email || '')} • ${escapeHtml(DEMO_USER.plan)}</div>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <div class="hidden sm:flex items-center gap-2 rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-slate-50'} px-3 py-2">
+                  <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-700'}">Último score</div>
+                  <div class="text-xs font-semibold">${score === null ? '—' : score + '/100'}</div>
+                  <span class="mx-2 h-4 w-px ${theme==='dark'?'bg-white/10':'bg-slate-200'}"></span>
+                  <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-700'}">Riesgo</div>
+                  <div class="text-xs font-semibold">${escapeHtml(risk)}</div>
+                </div>
+
+                <button id="themeBtn" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition" title="Cambiar tema">
+                  ${theme==='dark'?'Oscuro':'Claro'}
+                </button>
+                <button id="signOutBtn" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">
+                  Salir
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <aside class="lg:col-span-3">
+              <nav class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-2">
+                ${navItem('overview', 'Resumen', 'Tablero y estado', route)}
+                ${navItem('assessment', 'Nueva evaluación', 'Checklist guiada', route)}
+                ${navItem('findings', 'Hallazgos', 'Prioriza y marca resuelto', route)}
+                ${navItem('reports', 'Reportes', 'Exporta / imprime', route)}
+                ${navItem('settings', 'Ajustes', 'Preferencias y datos', route)}
+              </nav>
+
+              <div class="mt-4 rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+                <div class="text-sm font-semibold">Conectar iPhone</div>
+                <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-2 leading-relaxed">
+                  Un navegador no puede leer seguridad del iPhone por cable. Para auditoría real se requiere
+                  <span class="font-semibold">MDM</span>, una <span class="font-semibold">app</span> o herramientas autorizadas.
+                  Aquí generamos un informe basado en configuración.
+                </div>
+                <button id="demoConnect" class="mt-3 w-full rounded-xl px-3 py-2 text-sm font-semibold bg-gradient-to-r from-indigo-500/90 to-sky-500/90 text-white hover:opacity-95 transition">
+                  Simular conexión (demo)
+                </button>
+              </div>
+            </aside>
+
+            <main class="lg:col-span-9">
+              ${route === 'overview' ? viewOverview() : ''}
+              ${route === 'assessment' ? viewAssessment() : ''}
+              ${route === 'findings' ? viewFindings() : ''}
+              ${route === 'reports' ? viewReports() : ''}
+              ${route === 'settings' ? viewSettings() : ''}
+            </main>
+          </div>
+
+          <footer class="py-8">
+            <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-xs ${theme==='dark'?'text-slate-400':'text-slate-500'}">
+              iAudit SaaS (Demo) — evaluación basada en checklist. No realiza escaneo real ni explotación.
+            </div>
+          </footer>
+        </div>
+      `;
+    }
+
+    function navItem(key, title, subtitle, activeKey) {
+      const theme = state.prefs.theme;
+      const active = key === activeKey;
+      return `
+        <button data-route="${key}" class="w-full text-left px-3 py-2.5 rounded-xl transition ${active ? (theme==='dark'?'bg-white/10 ring-1 ring-white/10':'bg-slate-50 ring-1 ring-slate-200') : (theme==='dark'?'hover:bg-white/5':'hover:bg-slate-50')}">
+          <div class="text-sm font-semibold">${escapeHtml(title)}</div>
+          <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">${escapeHtml(subtitle)}</div>
+        </button>
+      `;
+    }
+
+    function card(title, bodyHtml, actionsHtml='') {
+      const theme = state.prefs.theme;
+      return `
+        <section class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'}">
+          <div class="p-5 sm:p-6 flex items-start justify-between gap-4">
+            <div>
+              <h2 class="text-base sm:text-lg font-semibold">${escapeHtml(title)}</h2>
+            </div>
+            ${actionsHtml ? `<div class="shrink-0">${actionsHtml}</div>` : ''}
+          </div>
+          <div class="px-5 sm:px-6 pb-6">${bodyHtml}</div>
+        </section>
+      `;
+    }
+
+    function pill(sev) {
+      const theme = state.prefs.theme;
+      const meta = severityMeta[sev] || severityMeta.info;
+      // adjust light mode colors
+      const light = {
+        critical:'bg-rose-50 text-rose-700 ring-rose-200',
+        high:'bg-orange-50 text-orange-700 ring-orange-200',
+        medium:'bg-amber-50 text-amber-800 ring-amber-200',
+        low:'bg-sky-50 text-sky-700 ring-sky-200',
+        info:'bg-slate-50 text-slate-700 ring-slate-200'
+      };
+      const cls = theme==='dark' ? meta.color : light[sev] || light.info;
+      return `<span class="inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold ring-1 ${cls}">${meta.label}</span>`;
+    }
+
+    function progressRing(score) {
+      const theme = state.prefs.theme;
+      const r = 34;
+      const c = 2 * Math.PI * r;
+      const pct = clamp(score ?? 0, 0, 100);
+      const dash = (pct/100) * c;
+      const stroke = pct >= 85 ? (theme==='dark'?'#34d399':'#059669') : pct >= 70 ? (theme==='dark'?'#38bdf8':'#0284c7') : pct >= 50 ? (theme==='dark'?'#fbbf24':'#d97706') : (theme==='dark'?'#fb7185':'#e11d48');
+      return `
+        <div class="relative h-24 w-24">
+          <svg viewBox="0 0 100 100" class="h-24 w-24">
+            <circle cx="50" cy="50" r="${r}" fill="none" stroke="${theme==='dark'?'rgba(255,255,255,.08)':'rgba(15,23,42,.10)'}" stroke-width="10" />
+            <circle cx="50" cy="50" r="${r}" fill="none" stroke="${stroke}" stroke-linecap="round" stroke-width="10"
+              stroke-dasharray="${dash} ${c}" transform="rotate(-90 50 50)" />
+          </svg>
+          <div class="absolute inset-0 flex items-center justify-center">
+            <div class="text-center">
+              <div class="text-lg font-semibold leading-5">${score ?? '—'}</div>
+              <div class="text-[10px] ${theme==='dark'?'text-slate-300':'text-slate-600'}">/100</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function viewOverview() {
+      const theme = state.prefs.theme;
+      const assessments = state.prefs.assessments || [];
+      const last = assessments[0] || null;
+
+      const summaryBody = `
+        <div class="flex flex-col sm:flex-row gap-6 sm:items-center sm:justify-between">
+          <div class="flex items-center gap-4">
+            ${progressRing(last?.score ?? null)}
+            <div>
+              <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Estado actual</div>
+              <div class="text-xl font-semibold">Riesgo: ${escapeHtml(last?.riskBand ?? '—')}</div>
+              <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">
+                Última evaluación: ${last ? escapeHtml(formatDateTime(last.createdAt)) : '—'}
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 w-full sm:w-auto">
+            ${metric('Críticas', last?.breakdown?.critical ?? 0)}
+            ${metric('Altas', last?.breakdown?.high ?? 0)}
+            ${metric('Medias', last?.breakdown?.medium ?? 0)}
+            ${metric('Bajas', last?.breakdown?.low ?? 0)}
+            ${metric('Info', last?.breakdown?.info ?? 0)}
+            ${metric('Historial', assessments.length)}
+          </div>
+        </div>
+
+        <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+          ${hintCard('Qué hace esta app',
+            'Genera un informe de postura de seguridad basado en tu configuración (checklist). No realiza escaneo real del iPhone desde el navegador.'
+          )}
+          ${hintCard('Cómo usarla',
+            'Ve a “Nueva evaluación”, completa la checklist, ejecuta la evaluación y revisa “Hallazgos”. Exporta tu reporte en “Reportes”.'
+          )}
+        </div>
+      `;
+
+      const recentBody = assessments.length ? `
+        <div class="overflow-hidden rounded-xl border ${theme==='dark'?'border-white/10':'border-slate-200'}">
+          <div class="grid grid-cols-12 gap-0 text-xs ${theme==='dark'?'text-slate-300 bg-white/5':'text-slate-600 bg-slate-50'} px-3 py-2">
+            <div class="col-span-5">Dispositivo</div>
+            <div class="col-span-2">iOS</div>
+            <div class="col-span-2">Score</div>
+            <div class="col-span-3">Fecha</div>
+          </div>
+          <div class="divide-y ${theme==='dark'?'divide-white/10':'divide-slate-200'}">
+            ${assessments.slice(0, 6).map(a => `
+              <button class="w-full text-left grid grid-cols-12 gap-0 px-3 py-2.5 hover:${theme==='dark'?'bg-white/5':'bg-slate-50'} transition" data-open-assessment="${a.id}">
+                <div class="col-span-5 font-semibold truncate">${escapeHtml(a.device?.model || 'iPhone')}</div>
+                <div class="col-span-2 text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">${escapeHtml(a.device?.iosVersion || '—')}</div>
+                <div class="col-span-2 text-sm font-semibold">${a.score}/100</div>
+                <div class="col-span-3 text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">${escapeHtml(formatDateTime(a.createdAt))}</div>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      ` : `
+        <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Aún no hay evaluaciones. Crea una en “Nueva evaluación”.</div>
+      `;
+
+      return `
+        <div class="space-y-6">
+          ${card('Resumen', summaryBody, `<button id="newAssessmentCta" class="px-3 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500/90 to-sky-500/90 text-white hover:opacity-95 transition">Nueva evaluación</button>`)}
+          ${card('Evaluaciones recientes', recentBody)}
+        </div>
+      `;
+    }
+
+    function metric(label, value) {
+      const theme = state.prefs.theme;
+      return `
+        <div class="rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-3">
+          <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">${escapeHtml(label)}</div>
+          <div class="text-lg font-semibold mt-0.5">${escapeHtml(value)}</div>
+        </div>
+      `;
+    }
+
+    function hintCard(title, text) {
+      const theme = state.prefs.theme;
+      return `
+        <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+          <div class="text-sm font-semibold">${escapeHtml(title)}</div>
+          <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1 leading-relaxed">${escapeHtml(text)}</div>
+        </div>
+      `;
+    }
+
+    function viewAssessment() {
+      const theme = state.prefs.theme;
+      const saved = state.prefs.lastForm || null;
+      const f = normalizeForm(saved);
+
+      const body = `
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <div class="text-sm font-semibold">Datos del dispositivo</div>
+                <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">Ingresa información básica.</div>
+              </div>
+              <span class="text-xs ${theme==='dark'?'text-slate-400':'text-slate-500'}">Checklist</span>
+            </div>
+            <div class="mt-3 space-y-3">
+              ${inputText('deviceModel','Modelo','Ej: iPhone 14 Pro', f.device.model)}
+              ${inputText('iosVersion','Versión de iOS','Ej: 17.3', f.device.iosVersion)}
+              ${toggle('jailbroken','¿Jailbreak?', f.device.jailbroken, 'Si está jailbreakeado, el riesgo aumenta significativamente.')}
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                ${select('passcode','Tipo de passcode', f.security.passcode, [
+                  ['none','Sin passcode'],
+                  ['4digit','4 dígitos'],
+                  ['6digit','6 dígitos'],
+                  ['alphanumeric','Alfanumérico']
+                ])}
+                ${select('autoLock','Auto-bloqueo', String(f.security.autoLockMinutes), [
+                  ['0.5','30 segundos'],
+                  ['1','1 minuto'],
+                  ['2','2 minutos'],
+                  ['5','5 minutos'],
+                  ['10','10 minutos']
+                ])}
+              </div>
+              ${toggle('usbRestricted','Restringir accesorios USB (recomendado)', f.security.usbRestricted, 'Reduce riesgo ante ataques físicos con accesorios.')}
+            </div>
+          </div>
+
+          <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+            <div class="text-sm font-semibold">Cuenta y cifrado</div>
+            <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">Controles clave del Apple ID / iCloud.</div>
+            <div class="mt-3 space-y-3">
+              ${toggle('twoFactor','2FA (Apple ID) activado', f.security.twoFactor, 'Activa 2FA para reducir toma de cuenta.')}
+              ${toggle('findMy','Buscar mi iPhone activado', f.security.findMy, 'Permite rastreo y borrado remoto.')}
+              ${toggle('icKeychain','Llavero iCloud (o gestor confiable)', f.security.icKeychain, 'Evita reutilización de contraseñas.')}
+              ${toggle('advancedDataProtection','Protección avanzada de datos (iCloud) activada', f.security.advancedDataProtection, 'Más cifrado end-to-end para datos en iCloud (si aplica).')}
+              ${toggle('lockdownMode','Modo de aislamiento (Lockdown) activado', f.security.lockdownMode, 'Para amenazas dirigidas; opcional para usuarios comunes.')}
+            </div>
+          </div>
+
+          <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+            <div class="text-sm font-semibold">Red y navegación</div>
+            <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">Minimiza exposición en redes no confiables.</div>
+            <div class="mt-3 space-y-3">
+              ${toggle('usesICloudPlus','Tengo iCloud+', f.network.usesICloudPlus, 'Habilita opciones como Relay privado (según región/red).')}
+              ${toggle('privateRelay','Relay privado habilitado (si aplica)', f.network.privateRelay, 'Mejora privacidad en Safari, no sustituye controles corporativos.')}
+              ${toggle('autoJoinOpenWiFi','Auto-unión a Wi‑Fi abiertas', f.network.autoJoinOpenWiFi, 'Desactiva en entornos de riesgo.')}
+              ${toggle('vpnWhenUntrusted','Uso VPN en redes públicas', f.network.vpnWhenUntrusted, 'Recomendado al viajar o usar Wi‑Fi pública.')}
+            </div>
+          </div>
+
+          <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+            <div class="text-sm font-semibold">Apps, perfiles y privacidad</div>
+            <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">Señales comunes de riesgo organizacional y personal.</div>
+            <div class="mt-3 space-y-3">
+              ${toggle('sideloading','Instalo apps fuera de App Store', f.apps.sideloading, 'Aumenta riesgo si no hay control de integridad.')}
+              ${toggle('unknownProfiles','Perfiles desconocidos instalados', f.apps.unknownProfiles, 'Pueden imponer proxies/certificados/políticas.')}
+              ${toggle('enterpriseCerts','Certificados empresariales presentes', f.apps.enterpriseCerts, 'Ok si es de tu org; revisa si no lo es.')}
+              ${toggle('adTrackingAllowed','Permito rastreo publicitario', f.privacy.adTrackingAllowed, 'Reduce privacidad; desactiva si no es necesario.')}
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-5 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} leading-relaxed">
+            Guardamos respuestas localmente (en tu navegador) para historial. Nada se envía a servidores en esta demo.
+          </div>
+          <div class="flex gap-2">
+            <button id="saveDraft" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">Guardar borrador</button>
+            <button id="runAssessment" class="px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500 to-sky-500 text-white hover:opacity-95 transition">Ejecutar evaluación</button>
+          </div>
+        </div>
+      `;
+
+      return card('Nueva evaluación (checklist)', body);
+    }
+
+    function normalizeForm(f) {
+      const base = {
+        device: { model:'', iosVersion:'', jailbroken:false },
+        security: {
+          passcode:'6digit',
+          autoLockMinutes: 1,
+          usbRestricted: true,
+          twoFactor: true,
+          findMy: true,
+          icKeychain: true,
+          advancedDataProtection: false,
+          lockdownMode: false
+        },
+        network: {
+          usesICloudPlus: false,
+          privateRelay: false,
+          autoJoinOpenWiFi: false,
+          vpnWhenUntrusted: false
+        },
+        apps: {
+          sideloading: false,
+          unknownProfiles: false,
+          enterpriseCerts: false
+        },
+        privacy: {
+          adTrackingAllowed: false
+        }
+      };
+      if (!f) return base;
+      // merge shallow
+      return {
+        device: { ...base.device, ...(f.device||{}) },
+        security: { ...base.security, ...(f.security||{}) },
+        network: { ...base.network, ...(f.network||{}) },
+        apps: { ...base.apps, ...(f.apps||{}) },
+        privacy: { ...base.privacy, ...(f.privacy||{}) }
+      };
+    }
+
+    function inputText(id, label, placeholder, value='') {
+      const theme = state.prefs.theme;
+      return `
+        <div>
+          <label class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-700'}">${escapeHtml(label)}</label>
+          <input data-field="${id}" type="text" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}"
+            class="mt-1 w-full rounded-xl px-3 py-2 bg-transparent ring-1 ${theme==='dark'?'ring-white/10 focus:ring-sky-400/40':'ring-slate-200 focus:ring-sky-400/40'} outline-none" />
+        </div>
+      `;
+    }
+
+    function select(id, label, value, options) {
+      const theme = state.prefs.theme;
+      return `
+        <div>
+          <label class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-700'}">${escapeHtml(label)}</label>
+          <select data-field="${id}" class="mt-1 w-full rounded-xl px-3 py-2 bg-transparent ring-1 ${theme==='dark'?'ring-white/10 focus:ring-sky-400/40':'ring-slate-200 focus:ring-sky-400/40'} outline-none">
+            ${options.map(([k, t]) => `<option value="${escapeHtml(k)}" ${String(k)===String(value)?'selected':''}>${escapeHtml(t)}</option>`).join('')}
+          </select>
+        </div>
+      `;
+    }
+
+    function toggle(id, label, checked, helper='') {
+      const theme = state.prefs.theme;
+      return `
+        <label class="flex items-start justify-between gap-3 rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5 hover:bg-white/10':'border-slate-200 bg-white hover:bg-slate-50'} p-3 transition cursor-pointer">
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold">${escapeHtml(label)}</span>
+            ${helper ? `<span class="block text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-0.5">${escapeHtml(helper)}</span>` : ''}
+          </span>
+          <span class="shrink-0">
+            <input data-field="${id}" type="checkbox" ${checked ? 'checked' : ''} class="h-5 w-5 accent-sky-500" />
+          </span>
+        </label>
+      `;
+    }
+
+    function viewFindings() {
+      const theme = state.prefs.theme;
+      const assessments = state.prefs.assessments || [];
+      const last = assessments[0] || null;
+
+      if (!last) {
+        return card('Hallazgos', `<div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Aún no hay hallazgos. Ejecuta una evaluación primero.</div>`);
+      }
+
+      const filter = state.ui.filterSeverity;
+      const resolved = state.prefs.findingsResolved || {};
+
+      const visible = last.findings.filter(f => {
+        if (filter === 'all') return true;
+        if (filter === 'open') return !resolved[f.id];
+        return f.severity === filter;
+      });
+
+      const toolbar = `
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">
+            Evaluación: <span class="font-semibold">${escapeHtml(last.device?.model || 'iPhone')}</span> • iOS ${escapeHtml(last.device?.iosVersion || '—')} • ${escapeHtml(formatDateTime(last.createdAt))}
+          </div>
+          <div class="flex items-center gap-2">
+            <select id="severityFilter" class="rounded-xl px-3 py-2 text-sm bg-transparent ring-1 ${theme==='dark'?'ring-white/10':'ring-slate-200'} outline-none">
+              <option value="all" ${filter==='all'?'selected':''}>Todos</option>
+              <option value="open" ${filter==='open'?'selected':''}>Sólo pendientes</option>
+              <option value="critical" ${filter==='critical'?'selected':''}>Críticas</option>
+              <option value="high" ${filter==='high'?'selected':''}>Altas</option>
+              <option value="medium" ${filter==='medium'?'selected':''}>Medias</option>
+              <option value="low" ${filter==='low'?'selected':''}>Bajas</option>
+              <option value="info" ${filter==='info'?'selected':''}>Info</option>
+            </select>
+            <button id="resetResolved" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">Reabrir todo</button>
+          </div>
+        </div>
+      `;
+
+      const list = visible.length ? `
+        <div class="mt-4 space-y-3">
+          ${visible.map(f => {
+            const isResolved = !!resolved[f.id];
+            return `
+              <article class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      ${pill(f.severity)}
+                      ${isResolved ? `<span class="inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold ring-1 ${theme==='dark'?'bg-emerald-500/15 text-emerald-200 ring-emerald-400/30':'bg-emerald-50 text-emerald-700 ring-emerald-200'}">Resuelto</span>` : ''}
+                      <div class="text-sm font-semibold truncate">${escapeHtml(f.title)}</div>
+                    </div>
+                    <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-2 leading-relaxed">
+                      ${escapeHtml(f.detail)}
+                    </div>
+                    <div class="mt-3 rounded-xl border ${theme==='dark'?'border-white/10 bg-black/10':'border-slate-200 bg-slate-50'} p-3">
+                      <div class="text-xs font-semibold">Recomendación</div>
+                      <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">${escapeHtml(f.fix)}</div>
+                    </div>
+                  </div>
+                  <div class="shrink-0 flex flex-col gap-2">
+                    <button data-toggle-resolved="${escapeHtml(f.id)}" class="px-3 py-2 rounded-xl text-sm font-semibold ${isResolved ? (theme==='dark'?'bg-white/10 hover:bg-white/15':'bg-slate-100 hover:bg-slate-200') : 'bg-gradient-to-r from-indigo-500 to-sky-500 text-white hover:opacity-95'} transition">
+                      ${isResolved ? 'Marcar pendiente' : 'Marcar resuelto'}
+                    </button>
+                    <button data-copy="${escapeHtml(f.id)}" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">Copiar</button>
+                  </div>
+                </div>
+              </article>
+            `;
+          }).join('')}
+        </div>
+      ` : `
+        <div class="mt-4 text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">No hay hallazgos para este filtro.</div>
+      `;
+
+      return card('Hallazgos (última evaluación)', toolbar + list);
+    }
+
+    function viewReports() {
+      const theme = state.prefs.theme;
+      const assessments = state.prefs.assessments || [];
+      const last = assessments[0] || null;
+
+      const body = `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div class="lg:col-span-2">
+            <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold">Reporte</div>
+                  <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">Exporta o imprime el último reporte.</div>
+                </div>
+                <div class="flex gap-2">
+                  <button id="exportJson" class="px-3 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500/90 to-sky-500/90 text-white hover:opacity-95 transition" ${last ? '' : 'disabled'}>
+                    Exportar JSON
+                  </button>
+                  <button id="printReport" class="px-3 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10 disabled:opacity-50':'ring-slate-200 hover:bg-slate-50 disabled:opacity-50'} transition" ${last ? '' : 'disabled'}>
+                    Imprimir
+                  </button>
+                </div>
+              </div>
+
+              <div id="reportPreview" class="mt-4 rounded-2xl border ${theme==='dark'?'border-white/10 bg-black/10':'border-slate-200 bg-slate-50'} p-4">
+                ${last ? reportHtml(last) : `<div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">No hay datos todavía.</div>`}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+              <div class="text-sm font-semibold">Historial</div>
+              <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">Selecciona una evaluación para previsualizar.</div>
+              <div class="mt-3 space-y-2 max-h-[420px] overflow-auto pr-1">
+                ${assessments.length ? assessments.map(a => `
+                  <button class="w-full text-left rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5 hover:bg-white/10':'border-slate-200 bg-white hover:bg-slate-50'} p-3 transition" data-open-assessment="${a.id}">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="text-sm font-semibold truncate">${escapeHtml(a.device?.model || 'iPhone')}</div>
+                      <div class="text-sm font-semibold">${a.score}/100</div>
+                    </div>
+                    <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">iOS ${escapeHtml(a.device?.iosVersion || '—')} • ${escapeHtml(formatDateTime(a.createdAt))}</div>
+                  </button>
+                `).join('') : `<div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">Vacío.</div>`}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      return card('Reportes', body);
+    }
+
+    function reportHtml(a) {
+      const theme = state.prefs.theme;
+      const resolved = state.prefs.findingsResolved || {};
+      const open = a.findings.filter(f => !resolved[f.id]);
+
+      const sevOrder = { critical:0, high:1, medium:2, low:3, info:4 };
+      const sorted = [...open].sort((x,y) => (sevOrder[x.severity] ?? 9) - (sevOrder[y.severity] ?? 9));
+
+      return `
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">Dispositivo</div>
+            <div class="text-lg font-semibold">${escapeHtml(a.device?.model || 'iPhone')}</div>
+            <div class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">iOS ${escapeHtml(a.device?.iosVersion || '—')} • ${escapeHtml(formatDateTime(a.createdAt))}</div>
+          </div>
+          <div class="flex items-center gap-4">
+            ${progressRing(a.score)}
+            <div>
+              <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">Riesgo</div>
+              <div class="text-lg font-semibold">${escapeHtml(a.riskBand)}</div>
+              <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">Pendientes: <span class="font-semibold">${open.length}</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-2">
+          ${mini('Críticas', a.breakdown.critical)}
+          ${mini('Altas', a.breakdown.high)}
+          ${mini('Medias', a.breakdown.medium)}
+          ${mini('Bajas', a.breakdown.low)}
+          ${mini('Info', a.breakdown.info)}
+        </div>
+
+        <div class="mt-4">
+          <div class="text-sm font-semibold">Top acciones (pendientes)</div>
+          <ol class="mt-2 space-y-2 list-decimal list-inside">
+            ${(sorted.slice(0, 6)).map(f => `
+              <li class="text-sm ${theme==='dark'?'text-slate-200':'text-slate-800'}">
+                <span class="mr-2">${pill(f.severity)}</span>
+                <span class="font-semibold">${escapeHtml(f.title)}:</span>
+                <span class="${theme==='dark'?'text-slate-300':'text-slate-600'}">${escapeHtml(f.fix)}</span>
+              </li>
+            `).join('') || `<li class="text-sm ${theme==='dark'?'text-slate-300':'text-slate-600'}">No hay acciones pendientes.</li>`}
+          </ol>
+        </div>
+
+        <div class="mt-4 text-xs ${theme==='dark'?'text-slate-400':'text-slate-500'}">
+          Nota: informe basado en checklist; no es prueba de vulnerabilidades explotables.
+        </div>
+      `;
+    }
+
+    function mini(label, value) {
+      const theme = state.prefs.theme;
+      return `
+        <div class="rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-3">
+          <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'}">${escapeHtml(label)}</div>
+          <div class="text-sm font-semibold">${escapeHtml(value)}</div>
+        </div>
+      `;
+    }
+
+    function viewSettings() {
+      const theme = state.prefs.theme;
+      const org = state.prefs.org || '';
+
+      const body = `
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+            <div class="text-sm font-semibold">Preferencias</div>
+            <div class="mt-3 space-y-3">
+              <div>
+                <label class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-700'}">Organización (para reportes)</label>
+                <input id="orgName" type="text" value="${escapeHtml(org)}" placeholder="Tu organización"
+                  class="mt-1 w-full rounded-xl px-3 py-2 bg-transparent ring-1 ${theme==='dark'?'ring-white/10 focus:ring-sky-400/40':'ring-slate-200 focus:ring-sky-400/40'} outline-none" />
+              </div>
+
+              <label class="flex items-start justify-between gap-3 rounded-xl border ${theme==='dark'?'border-white/10 bg-white/5 hover:bg-white/10':'border-slate-200 bg-white hover:bg-slate-50'} p-3 transition cursor-pointer">
+                <span class="min-w-0">
+                  <span class="block text-sm font-semibold">Tema</span>
+                  <span class="block text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-0.5">Cambia entre oscuro y claro.</span>
+                </span>
+                <span class="shrink-0">
+                  <select id="themeSelect" class="rounded-xl px-3 py-2 text-sm bg-transparent ring-1 ${theme==='dark'?'ring-white/10':'ring-slate-200'} outline-none">
+                    <option value="dark" ${theme==='dark'?'selected':''}>Oscuro</option>
+                    <option value="light" ${theme==='dark'?'':'selected'}>Claro</option>
+                  </select>
+                </span>
+              </label>
+
+              <button id="saveSettings" class="px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-indigo-500 to-sky-500 text-white hover:opacity-95 transition">
+                Guardar ajustes
+              </button>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border ${theme==='dark'?'border-white/10 bg-white/5':'border-slate-200 bg-white'} p-4">
+            <div class="text-sm font-semibold">Datos</div>
+            <div class="text-xs ${theme==='dark'?'text-slate-300':'text-slate-600'} mt-1">Gestiona historial y borradores locales.</div>
+            <div class="mt-3 space-y-2">
+              <button id="clearHistory" class="w-full px-4 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">Borrar historial de evaluaciones</button>
+              <button id="clearDraft" class="w-full px-4 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">Borrar borrador de checklist</button>
+              <button id="clearResolved" class="w-full px-4 py-2 rounded-xl text-sm ring-1 ${theme==='dark'?'ring-white/10 hover:bg-white/10':'ring-slate-200 hover:bg-slate-50'} transition">Reiniciar “Resuelto”</button>
+              <button id="factoryReset" class="w-full px-4 py-2 rounded-xl text-sm font-semibold ${theme==='dark'?'bg-rose-500/15 text-rose-200 ring-1 ring-rose-400/30 hover:bg-rose-500/20':'bg-rose-50 text-rose-700 ring-1 ring-rose-200 hover:bg-rose-100'} transition">Restablecer demo</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      return card('Ajustes', body);
+    }
+
+    // ------------------------
+    // Interaction / Routing
+    // ------------------------
+    function render() {
+      setTheme(state.prefs.theme || 'dark');
+      const s = session.get();
+      state.user = s?.user || null;
+      app.innerHTML = state.user ? layoutApp() : layoutAuth();
+      bind();
+    }
+
+    function bind() {
+      const isAuthed = !!state.user;
+      if (!isAuthed) return bindAuth();
+      bindApp();
+    }
+
+    function bindAuth() {
+      const email = $('#email');
+      const pass = $('#password');
+      // prefill demo for convenience
+      email.value = DEMO_USER.email;
+      pass.value = DEMO_USER.password;
+
+      $('#useDemo').addEventListener('click', (e) => {
+        e.preventDefault();
+        email.value = DEMO_USER.email;
+        pass.value = DEMO_USER.password;
+        toast('info', 'Credenciales demo', 'Se rellenaron email y contraseña de prueba.');
+      });
+
+      $('#toggleTheme').addEventListener('click', () => {
+        setTheme(state.prefs.theme === 'dark' ? 'light' : 'dark');
+        render();
+      });
+
+      const doLogin = () => {
+        const e = (email.value || '').trim().toLowerCase();
+        const p = (pass.value || '').trim();
+        if (e === DEMO_USER.email && p === DEMO_USER.password) {
+          session.set({ user: { email: e, name: DEMO_USER.name }, createdAt: Date.now() });
+          toast('success', 'Sesión iniciada', 'Bienvenido/a.');
+          render();
+        } else {
+          toast('danger', 'Login inválido', 'Usa demo@iaudit.local / demo1234');
+        }
+      };
+
+      $('#loginBtn').addEventListener('click', doLogin);
+      pass.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') doLogin();
+      });
+    }
+
+    function bindApp() {
+      // Nav
+      $$('button[data-route]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.ui.route = btn.getAttribute('data-route');
+          render();
+        });
+      });
+
+      // header actions
+      $('#signOutBtn')?.addEventListener('click', () => {
+        session.clear();
+        toast('info', 'Sesión cerrada', 'Hasta luego.');
+        render();
+      });
+      $('#themeBtn')?.addEventListener('click', () => {
+        setTheme(state.prefs.theme === 'dark' ? 'light' : 'dark');
+        render();
+      });
+
+      // Connect demo
+      $('#demoConnect')?.addEventListener('click', () => {
+        toast('info', 'Conexión simulada', 'Demo: se detectó un iPhone (simulado). Completa la checklist para evaluar.');
+        // seed draft with plausible values to speed-up
+        const draft = normalizeForm(state.prefs.lastForm);
+        if (!draft.device.model) draft.device.model = 'iPhone (simulado)';
+        if (!draft.device.iosVersion) draft.device.iosVersion = '17.3';
+        state.prefs.lastForm = draft;
+        persistPrefs();
+        state.ui.route = 'assessment';
+        render();
+      });
+
+      // CTA
+      $('#newAssessmentCta')?.addEventListener('click', () => {
+        state.ui.route = 'assessment';
+        render();
+      });
+
+      // Open assessment from lists
+      $$('[data-open-assessment]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-open-assessment');
+          const list = state.prefs.assessments || [];
+          const idx = list.findIndex(x => x.id === id);
+          if (idx <= -1) return;
+          // move to top
+          const a = list.splice(idx, 1)[0];
+          list.unshift(a);
+          state.prefs.assessments = list;
+          persistPrefs();
+          toast('success', 'Evaluación cargada', 'Se movió al inicio del historial para previsualizar.');
+          render();
+        });
+      });
+
+      // Assessment form handlers
+      $('#saveDraft')?.addEventListener('click', () => {
+        const form = collectForm();
+        state.prefs.lastForm = form;
+        persistPrefs();
+        toast('success', 'Borrador guardado', 'Se guardó localmente en este navegador.');
+      });
+
+      $('#runAssessment')?.addEventListener('click', () => {
+        const form = collectForm();
+        state.prefs.lastForm = form;
+
+        const assessment = computeAssessment(form);
+        const list = state.prefs.assessments || [];
+        list.unshift(assessment);
+        state.prefs.assessments = list.slice(0, 25);
+        persistPrefs();
+
+        // reset resolved map for new run (keep previous resolved for same finding IDs, but IDs are deterministic? They are not. So we keep it separate.)
+        toast('success', 'Evaluación completada', `Score ${assessment.score}/100 (${assessment.riskBand}).`);
+        state.ui.route = 'findings';
+        render();
+      });
+
+      // Findings interactions
+      $('#severityFilter')?.addEventListener('change', (e) => {
+        state.ui.filterSeverity = e.target.value;
+        render();
+      });
+
+      $('#resetResolved')?.addEventListener('click', () => {
+        state.prefs.findingsResolved = {};
+        persistPrefs();
+        toast('info', 'Reabierto', 'Todos los hallazgos quedaron pendientes.');
+        render();
+      });
+
+      $$('[data-toggle-resolved]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-toggle-resolved');
+          const m = state.prefs.findingsResolved || {};
+          m[id] = !m[id];
+          state.prefs.findingsResolved = m;
+          persistPrefs();
+          render();
+        });
+      });
+
+      $$('[data-copy]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-copy');
+          const a = (state.prefs.assessments || [])[0];
+          const f = a?.findings?.find(x => x.id === id);
+          if (!f) return;
+          const txt = `${f.title}\nSeveridad: ${f.severity}\n\nDetalle: ${f.detail}\n\nRecomendación: ${f.fix}`;
+          try {
+            await navigator.clipboard.writeText(txt);
+            toast('success', 'Copiado', 'Hallazgo copiado al portapapeles.');
+          } catch {
+            toast('warn', 'No se pudo copiar', 'Tu navegador bloqueó el portapapeles.');
+          }
+        });
+      });
+
+      // Reports
+      $('#exportJson')?.addEventListener('click', () => {
+        const a = (state.prefs.assessments || [])[0];
+        if (!a) return;
+        const resolved = state.prefs.findingsResolved || {};
+        const payload = {
+          generatedAt: new Date().toISOString(),
+          org: state.prefs.org || '',
+          assessment: a,
+          resolvedMap: resolved,
+          note: 'Checklist-based posture report. No real device scanning performed.'
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `iaudit-report-${new Date(a.createdAt).toISOString().slice(0,10)}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        toast('success', 'Exportado', 'Se descargó el reporte JSON.');
+      });
+
+      $('#printReport')?.addEventListener('click', () => {
+        const a = (state.prefs.assessments || [])[0];
+        if (!a) return;
+        const theme = state.prefs.theme;
+        const org = state.prefs.org || '';
+        const html = `
+          <html>
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>iAudit Report</title>
+            <style>
+              body{font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin:24px; color:#0f172a}
+              .muted{color:#475569}
+              .row{display:flex;gap:16px;align-items:flex-start;justify-content:space-between}
+              .card{border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-top:12px}
+              .pill{display:inline-block;border:1px solid #e2e8f0;border-radius:999px;padding:4px 10px;font-size:12px;margin-right:8px}
+              h1{font-size:20px;margin:0}
+              h2{font-size:14px;margin:0 0 6px 0}
+              .f{margin-top:10px}
+              .sev-critical{border-color:#fecdd3;background:#fff1f2}
+              .sev-high{border-color:#fed7aa;background:#fff7ed}
+              .sev-medium{border-color:#fde68a;background:#fffbeb}
+              .sev-low{border-color:#bae6fd;background:#f0f9ff}
+              .sev-info{border-color:#e2e8f0;background:#f8fafc}
+              @media print { body{margin:0.5in} }
+            </style>
+          </head>
+          <body>
+            <div class="row">
+              <div>
+                <h1>iAudit — Reporte (Checklist)</h1>
+                <div class="muted">Organización: ${escapeHtml(org || '—')}</div>
+                <div class="muted">Dispositivo: ${escapeHtml(a.device?.model || 'iPhone')} • iOS ${escapeHtml(a.device?.iosVersion || '—')}</div>
+                <div class="muted">Fecha: ${escapeHtml(formatDateTime(a.createdAt))}</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-size:28px;font-weight:700">${a.score}/100</div>
+                <div class="muted">Riesgo: <strong>${escapeHtml(a.riskBand)}</strong></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2>Resumen</h2>
+              <div class="muted">Críticas: ${a.breakdown.critical} • Altas: ${a.breakdown.high} • Medias: ${a.breakdown.medium} • Bajas: ${a.breakdown.low} • Info: ${a.breakdown.info}</div>
+              <div class="muted" style="margin-top:6px">Nota: informe basado en checklist; no es prueba de vulnerabilidades explotables.</div>
+            </div>
+
+            <div class="card">
+              <h2>Hallazgos</h2>
+              ${a.findings.map(f => {
+                const cls = 'sev-' + f.severity;
+                return `
+                  <div class="f">
+                    <div><span class="pill ${cls}">${escapeHtml(f.severity.toUpperCase())}</span><strong>${escapeHtml(f.title)}</strong></div>
+                    <div class="muted" style="margin-top:4px">${escapeHtml(f.detail)}</div>
+                    <div style="margin-top:6px"><strong>Recomendación:</strong> ${escapeHtml(f.fix)}</div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </body>
+          </html>
+        `;
+        const w = window.open('', '_blank');
+        w.document.open();
+        w.document.write(html);
+        w.document.close();
+        w.focus();
+        setTimeout(() => w.print(), 250);
+      });
+
+      // Settings
+      $('#saveSettings')?.addEventListener('click', () => {
+        const org = ($('#orgName')?.value || '').trim();
+        const theme = $('#themeSelect')?.value || 'dark';
+        state.prefs.org = org;
+        setTheme(theme);
+        persistPrefs();
+        toast('success', 'Guardado', 'Se actualizaron las preferencias.');
+        render();
+      });
+
+      $('#clearHistory')?.addEventListener('click', () => {
+        state.prefs.assessments = [];
+        persistPrefs();
+        toast('info', 'Historial borrado', 'Se eliminaron evaluaciones guardadas.');
+        render();
+      });
+      $('#clearDraft')?.addEventListener('click', () => {
+        state.prefs.lastForm = null;
+        persistPrefs();
+        toast('info', 'Borrador borrado', 'Se eliminó el borrador de checklist.');
+        render();
+      });
+      $('#clearResolved')?.addEventListener('click', () => {
+        state.prefs.findingsResolved = {};
+        persistPrefs();
+        toast('info', 'Reiniciado', 'Se reinició el estado de “Resuelto”.');
+        render();
+      });
+      $('#factoryReset')?.addEventListener('click', () => {
+        storage.set('iaudit.prefs', defaults);
+        state.prefs = storage.get('iaudit.prefs', defaults);
+        session.clear();
+        toast('warn', 'Restablecido', 'Se reinició la demo (preferencias, historial y sesión).');
+        render();
+      });
+    }
+
+    function collectForm() {
+      const f = normalizeForm(state.prefs.lastForm);
+      // Map fields
+      const getVal = (field) => {
+        const el = document.querySelector(`[data-field="${field}"]`);
+        if (!el) return null;
+        if (el.type === 'checkbox') return el.checked;
+        return el.value;
+      };
+
+      const model = (getVal('deviceModel') ?? '').toString();
+      const iosVersion = (getVal('iosVersion') ?? '').toString();
+      const jailbroken = !!getVal('jailbroken');
+
+      const passcode = (getVal('passcode') ?? '6digit').toString();
+      const autoLockMinutes = parseFloat((getVal('autoLock') ?? '1').toString());
+
+      return {
+        device: { model, iosVersion, jailbroken },
+        security: {
+          passcode,
+          autoLockMinutes: Number.isFinite(autoLockMinutes) ? autoLockMinutes : 1,
+          usbRestricted: !!getVal('usbRestricted'),
+          twoFactor: !!getVal('twoFactor'),
+          findMy: !!getVal('findMy'),
+          icKeychain: !!getVal('icKeychain'),
+          advancedDataProtection: !!getVal('advancedDataProtection'),
+          lockdownMode: !!getVal('lockdownMode')
+        },
+        network: {
+          usesICloudPlus: !!getVal('usesICloudPlus'),
+          privateRelay: !!getVal('privateRelay'),
+          autoJoinOpenWiFi: !!getVal('autoJoinOpenWiFi'),
+          vpnWhenUntrusted: !!getVal('vpnWhenUntrusted')
+        },
+        apps: {
+          sideloading: !!getVal('sideloading'),
+          unknownProfiles: !!getVal('unknownProfiles'),
+          enterpriseCerts: !!getVal('enterpriseCerts')
+        },
+        privacy: {
+          adTrackingAllowed: !!getVal('adTrackingAllowed')
+        }
+      };
+    }
+
+    // ------------------------
+    // Boot
+    // ------------------------
+    // Initialize prefs defaults if missing
+    (function init() {
+      const prefs = storage.get('iaudit.prefs', null);
+      if (!prefs) storage.set('iaudit.prefs', defaults);
+      state.prefs = storage.get('iaudit.prefs', defaults);
+      setTheme(state.prefs.theme || 'dark');
+      render();
+    })();
+  </script>
+</body>
+</html>
